@@ -6,7 +6,7 @@ defaults:
   - override hydra/hydra_logging: colorlog
 
 
-root_data_dir: /hkfs/work/workspace/scratch/ft4740-play3/data/task_ABC_D
+root_data_dir: /mnt/nvme-fast/zbs/fp/MoDE_Diffusion_Policy/dataset/task_D_D
 lang_folder: lang_clip_resnet50
 vis_clip_model_name: ViT-B/16
 clip_lang_model_name: ViT-B/32
@@ -14,9 +14,10 @@ clip_lang_model_name: ViT-B/32
 log_dir: ./logs
 slurm: false
 seed: 242
+resume_from_checkpoint: "/mnt/nvme-fast/zbs/fp/MoDE_Diffusion_Policy/logs/runs/2025-12-05/13-00-32_seed242/saved_models/epoch=09_eval_lh/avg_seq_len=3.51.ckpt"
 device: 'cuda'
 batch_size: 64 # 38 # 128
-devices: 4
+devices: 2
 act_dim: 7
 proprio_dims: 7
 obs_dim: 512
@@ -50,8 +51,9 @@ logger:
   name: logger
   group: mode
   log_model: false
-  project: ${benchmark_name}
-  entity: bennoq
+  project: mode-diffusion-policy
+  entity: zbs
+  offline: true
   id: ???
 
 

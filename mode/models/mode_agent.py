@@ -2,6 +2,8 @@ import logging
 import os
 from typing import Any, Dict, Optional, Tuple, List, DefaultDict
 from functools import partial
+import matplotlib.pyplot as plt
+import numpy as np
 import seaborn as sns
 
 import torch
@@ -19,7 +21,6 @@ from mode.utils.lr_schedulers.tri_stage_scheduler import TriStageLRScheduler
 from mode.callbacks.ema import EMA
 from mode.models.perceptual_encoders.resnets import ResNetEncoderWithFiLM
 from mode.models.perceptual_encoders.pretrained_resnets import FiLMResNet34Policy, FiLMResNet50Policy
-from mode.models.networks.modedit import NoiseBlockMoE 
 from mode.utils.lang_buffer import AdvancedLangEmbeddingBuffer
 
 
@@ -75,7 +76,9 @@ class MoDEAgent(pl.LightningModule):
         # Set obs_dim based on resnet_type
         obs_dim = 2048 if resnet_type == '50' else 512
         self.latent_dim = latent_dim
-        model.inner_model.obs_dim = obs_dim
+        # Only set obs_dim if not already specified in config
+        if not hasattr(model.inner_model, 'obs_dim') or model.inner_model.obs_dim is None:
+            model.inner_model.obs_dim = obs_dim
         self.model = hydra.utils.instantiate(model).to(self.device)
 
         # Select ResNet type based on parameter
@@ -460,55 +463,69 @@ class MoDEAgent(pl.LightningModule):
 
         output[f"idx_{self.modality_scope}"] = dataset_batch["idx"]
         output["validation_loss"] = pred_loss
-        self.log_expert_usage(self.model, self.current_epoch)
         return output
     
     def log_expert_usage(self, model, epoch):
-        log_dir = self.logger.save_dir
         expert_usages = {}
 
-        for name, module in self.model.inner_model.named_modules():
-            if isinstance(module, NoiseBlockMoE):
-                if module.total_tokens_processed > 0:
-                    # Use get_expert_usage() instead of property
-                    normalized_usage = module.get_expert_usage().cpu().numpy() / module.total_tokens_processed
-                    expert_usages[name] = normalized_usage
-                    module.reset_expert_usage()
+        for name, module in model.inner_model.named_modules():
+            get_expert_usage = getattr(module, "get_expert_usage", None)
+            reset_expert_usage = getattr(module, "reset_expert_usage", None)
+            total_tokens_processed = getattr(module, "total_tokens_processed", 0)
 
-        if expert_usages:
-            # print(f"Logging expert usage for epoch {epoch}")
-            # Convert list to numpy array
-            expert_usage_data = np.array(list(expert_usages.values()))
-            
-            # Normalize each row independently
-            row_sums = expert_usage_data.sum(axis=1, keepdims=True)
-            row_sums = np.maximum(row_sums, 1e-8)  # Avoid division by zero
-            expert_usage_data_normalized = expert_usage_data / row_sums
-            print(expert_usage_data_normalized)
-            # Plotting the heatmap
-            plt.figure(figsize=(12, 8))
-            sns.heatmap(
-                expert_usage_data_normalized, 
-                annot=True, 
-                fmt=".2f", 
-                cmap="coolwarm", 
-                xticklabels=range(expert_usage_data_normalized.shape[1]), 
-                yticklabels=[f'blocks.{i}' for i in range(expert_usage_data_normalized.shape[0])]
-            )
-            plt.xlabel('Expert Index')
-            plt.ylabel('Block Number')
-            plt.title(f'Expert Usage across Blocks (Epoch {epoch})')
-            
-            # Log the plot to wandb
-            # Log to wandb with additional metadata
-            self.logger.experiment.log({
-                "MoE_utils/expert_usage_heatmap": wandb.Image(plt),
-                "epoch": epoch
-            })
+            if not callable(get_expert_usage) or not callable(reset_expert_usage):
+                continue
 
-            plt.close()
-        else:
-            print(f"No expert usage data to log for epoch {epoch}")
+            try:
+                if torch.is_tensor(total_tokens_processed):
+                    total_tokens_processed = int(total_tokens_processed.item())
+                else:
+                    total_tokens_processed = int(total_tokens_processed)
+            except (TypeError, ValueError):
+                continue
+
+            if total_tokens_processed <= 0:
+                continue
+
+            usage = get_expert_usage()
+            if not torch.is_tensor(usage):
+                continue
+
+            normalized_usage = usage.detach().cpu().numpy() / total_tokens_processed
+            expert_usages[name] = normalized_usage
+
+        if not expert_usages:
+            return
+
+        experiment = getattr(self.logger, "experiment", None)
+        if experiment is None or not hasattr(experiment, "log"):
+            return
+
+        expert_usage_data = np.array(list(expert_usages.values()))
+        row_sums = expert_usage_data.sum(axis=1, keepdims=True)
+        expert_usage_data_normalized = expert_usage_data / np.maximum(row_sums, 1e-8)
+
+        fig, ax = plt.subplots(figsize=(12, 8))
+        sns.heatmap(
+            expert_usage_data_normalized,
+            annot=True,
+            fmt=".2f",
+            cmap="coolwarm",
+            xticklabels=range(expert_usage_data_normalized.shape[1]),
+            yticklabels=list(expert_usages.keys()),
+            ax=ax,
+        )
+        ax.set_xlabel("Expert Index")
+        ax.set_ylabel("Block")
+        ax.set_title(f"Expert Usage across Blocks (Epoch {epoch})")
+
+        experiment.log(
+            {
+                "MoE_utils/expert_usage_heatmap": wandb.Image(fig),
+                "epoch": epoch,
+            }
+        )
+        plt.close(fig)
 
     def log_with_device_check(self, name, value, **kwargs):
         if torch.is_tensor(value) and value.device.type != "cuda":
@@ -683,9 +700,14 @@ class MoDEAgent(pl.LightningModule):
     @rank_zero_only
     def on_validation_epoch_end(self) -> None:
         logger.info(f"Finished validation epoch {self.current_epoch}")
+        self.log_expert_usage(self.model, self.current_epoch)
 
     def on_validation_epoch_start(self) -> None:
         log_rank_0(f"Start validation epoch {self.current_epoch}")
+        for module in self.model.inner_model.modules():
+            reset_expert_usage = getattr(module, "reset_expert_usage", None)
+            if callable(reset_expert_usage):
+                reset_expert_usage()
         # self.model.inner_model.reset_expert_caches() if hasattr(self.model.inner_model, 'reset_expert_caches') else None
         # self.need_precompute_experts_for_inference = True
 

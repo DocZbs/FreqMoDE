@@ -2,26 +2,47 @@ from typing import List
 
 import torch
 import torch.nn as nn
-import clip 
+import clip
 from mode.models.networks.clip import build_model, load_clip, tokenize
-from transformers import (
-    AutoProcessor,
-    AutoModel,
-    SiglipProcessor,
-    SiglipModel
-)
+try:
+    from transformers import (
+        AutoProcessor,
+        AutoModel,
+        SiglipProcessor,
+        SiglipModel
+    )
+except ImportError:
+    from transformers import (
+        AutoProcessor,
+        AutoModel
+    )
+    SiglipProcessor = None
+    SiglipModel = None
 
 
 class LangClip(nn.Module):
-    def __init__(self, freeze_backbone: bool = True, model_name: str = "RN50"):
+    def __init__(self, freeze_backbone: bool = True, model_name: str = "RN50", device=None):
         super(LangClip, self).__init__()
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        if device is None:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            self.device = device
         # Load CLIP model
         print(f"loading language CLIP model with backbone: {model_name}")
         self._load_clip(model_name)
         if freeze_backbone:
             for param in self.clip_rn50.parameters():
                 param.requires_grad = False
+
+        # Set output dimension based on model
+        if "RN50" in model_name:
+            self.output_dim = 1024
+        elif "RN101" in model_name:
+            self.output_dim = 512
+        elif "ViT" in model_name:
+            self.output_dim = 512
+        else:
+            self.output_dim = 512
 
     def _load_clip(self, model_name: str) -> None:
         model, _ = load_clip(model_name, device=self.device)

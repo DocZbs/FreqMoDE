@@ -1,0 +1,331 @@
+# Vision-Aware Flow Matching Experiment Configuration for CALVIN
+
+defaults:
+  - _self_
+  - override hydra/job_logging: colorlog
+  - override hydra/hydra_logging: colorlog
+
+hydra:
+  run:
+    dir: ${work_dir}/${now:%Y%m%d}/${now:%H%M%S}_visaware_${flow_type}_${sampling_method}
+
+# Paths
+data_root: /mnt/nvme-fast/zbs/fp/MoDE_Diffusion_Policy/dataset/task_D_D
+work_dir: /mnt/nvme-fast/zbs/fp/MoDE_Diffusion_Policy/experiments/vis_aware/logs
+checkpoint_path: null
+lang_folder: lang_clip_resnet50
+
+# Experiment settings
+experiment_name: "vis_aware_flow_matching_calvin"
+flow_type: "rectified"
+sampling_method: "euler"
+
+# Model dimensions
+obs_dim: 2048  # ResNet50 output dimension per camera
+proprio_dims: 15
+cond_dim: 512
+latent_dim: 1024
+cls_token_dim: 1024  # 512 * 2 (static + gripper CLIP cls tokens)
+
+# Sequence lengths
+obs_seq_len: 1  # Temporal sequence length (cameras concatenated in state_images dim)
+act_seq_len: 10
+multistep: 10
+
+# Training
+seed: 42
+device: cuda
+batch_size: 64
+num_workers: 16
+use_extracted_rel_actions: true
+
+# Flow matching hyperparameters
+sigma_min: 0.001
+sigma_max: 80.0
+noise_schedule: 'exponential'
+
+# Evaluation
+num_sequences: 1000
+save_video: false
+
+# CLIP model
+clip_lang_model_name: "ViT-B/32"
+
+# Model config - Vision-Aware Flow Matching Agent
+model:
+  _target_: experiments.vis_aware.models.vis_aware_agent.VisAwareFlowMatchingAgent
+  _recursive_: false
+  multistep: ${multistep}
+  use_lr_scheduler: true
+  entropy_gamma: 0.0
+  router_z_delta: 0.0
+  use_proprio: false
+  seed: ${seed}
+  flow_type: ${flow_type}
+  sampling_method: ${sampling_method}
+  use_ot_flow: true
+  num_sampling_steps: 10
+  sigma_min: ${sigma_min}
+  sigma_max: ${sigma_max}
+  noise_schedule: ${noise_schedule}
+  start_from_pretrained: false
+  use_text_not_embedding: true
+  act_window_size: ${act_seq_len}
+  latent_dim: ${latent_dim}
+  obs_enc_dim: ${obs_dim}
+  cond_dim: ${cond_dim}
+  resnet_type: '50'
+  cls_token_dim: ${cls_token_dim}  # CLIP ViT-B/32 outputs 512-dim, *2 for two cameras
+
+  optimizer:
+    _target_: torch.optim.AdamW
+    transformer_weight_decay: 0.05
+    obs_encoder_weight_decay: 0.05
+    learning_rate: 1e-4
+    betas: [0.9, 0.95]
+
+  lr_scheduler:
+    lr_scheduler:
+      init_lr: 1e-4
+      init_lr_scale: 0.1
+      final_lr_scale: 1e-6
+      total_steps: 45000
+      phase_ratio: "(0.02, 0.08, 0.9)"
+      lr: 1e-4
+
+  model:
+    _target_: experiments.flow_matching.models.flow_wrappers.FlowMatchingWrapper
+    _recursive_: false
+    flow_type: ${flow_type}
+    sigma_min: ${sigma_min}
+    sigma_max: ${sigma_max}
+    sigma_data: 0.5
+    use_time_scaling: false
+    noise_schedule: ${noise_schedule}
+    rectified_use_linear_time: true
+
+    inner_model:
+      _target_: experiments.vis_aware.models.network.modedit_visaware.MoDeDiTVisAware
+      action_dim: 7
+      goal_dim: ${cond_dim}
+      obs_dim: ${obs_dim}
+      goal_conditioned: true
+      causal: true
+      use_custom_attn_mask: false
+      use_proprio: false
+      state_dim: ${proprio_dims}
+      embed_dim: ${latent_dim}
+      n_layers: 12
+      goal_seq_len: 1
+      obs_seq_len: ${obs_seq_len}
+      action_seq_len: ${act_seq_len}
+      embed_pdrob: 0
+      goal_drop: 0.1
+      attn_pdrop: 0.3
+      mlp_pdrop: 0.1
+      n_heads: 8
+      device: ${device}
+      linear_output: true
+      cond_router: true
+      num_experts: 4
+      top_k: 2
+      router_normalize: true
+      use_goal_in_routing: false
+      use_argmax: true
+      use_shared_expert: false
+      use_noise_token_as_input: true
+      init_style: 'olmoe'
+      vis_token_dim: ${cls_token_dim}
+
+  language_goal:
+    _target_: mode.models.networks.clip_lang_encoder.LangClip
+    _recursive_: false
+    model_name: ${clip_lang_model_name}
+
+# Data module config
+datamodule:
+  _target_: mode.datasets.hulc_data_module.HulcDataModule
+  _recursive_: false
+  root_data_dir: ${data_root}
+  action_space: 7
+  action_max: [1., 1., 1., 1., 1., 1., 1.]
+  action_min: [-1., -1., -1., -1., -1., -1., -1.]
+  shuffle_val: false
+
+  observation_space:
+    rgb_obs: ['rgb_static', 'rgb_gripper']
+    depth_obs: []
+    state_obs: ['robot_obs']
+    actions: ['rel_actions']
+    language: ['language']
+
+  proprioception_dims:
+    n_state_obs: 8
+    keep_indices: [[0, 7], [14, 15]]
+    robot_orientation_idx: [3, 6]
+    normalize: true
+    normalize_robot_orientation: true
+
+  transforms:
+    train:
+      rgb_static:
+        - _target_: mode.utils.transforms.ScaleImageTensor
+        - _target_: mode.utils.transforms.RandomShiftsAug
+          pad: 10
+      rgb_gripper:
+        - _target_: mode.utils.transforms.ScaleImageTensor
+        - _target_: mode.utils.transforms.RandomShiftsAug
+          pad: 10
+    val:
+      rgb_static:
+        - _target_: mode.utils.transforms.ScaleImageTensor
+      rgb_gripper:
+        - _target_: mode.utils.transforms.ScaleImageTensor
+
+  datasets:
+    lang_dataset:
+      _target_: mode.datasets.disk_dataset.ExtendedDiskDataset
+      key: "lang"
+      save_format: "npz"
+      batch_size: ${batch_size}
+      min_window_size: ${act_seq_len}
+      max_window_size: ${act_seq_len}
+      proprio_state: ${datamodule.proprioception_dims}
+      obs_space: ${datamodule.observation_space}
+      skip_frames: 1
+      pad: false
+      lang_folder: ${lang_folder}
+      aux_lang_loss_window: 8
+      num_workers: ${num_workers}
+      action_seq_len: ${act_seq_len}
+      obs_seq_len: ${obs_seq_len}
+      future_range: 1
+      use_extracted_rel_actions: ${use_extracted_rel_actions}
+
+# Trainer config
+trainer:
+  max_epochs: 100
+  max_steps: 45000
+  devices: 2
+  accelerator: gpu
+  strategy: ddp
+  precision: 32
+  gradient_clip_val: 1.0
+  log_every_n_steps: 10
+  val_check_interval: 2000
+  check_val_every_n_epoch: null  # Allow validation across epochs
+  limit_val_batches: 50
+
+# Logger - WandB for online tracking
+logger:
+  _target_: pytorch_lightning.loggers.WandbLogger
+  project: "MoDE_VisAware"
+  name: "${experiment_name}_${flow_type}_${now:%Y%m%d_%H%M%S}"
+  save_dir: ${work_dir}
+  offline: False
+  log_model: False
+
+# Callbacks
+callbacks:
+  checkpoint:
+    _target_: pytorch_lightning.callbacks.ModelCheckpoint
+    dirpath: ${work_dir}/checkpoints
+    filename: "vis_aware_epoch_{epoch:02d}_step_{step:06d}"
+    monitor: "val/total_loss"
+    mode: min
+    save_top_k: 3
+    save_last: true
+    every_n_epochs: 1
+  ema:
+    _target_: mode.callbacks.ema.EMA
+    decay: 0.999
+
+# Rollout callback for evaluation
+rollout_callback:
+  _target_: mode.rollout.rollout_long_horizon.RolloutLongHorizon
+  _recursive_: false
+  env_cfg:
+    _target_: mode.wrappers.hulc_wrapper.HulcWrapper
+  skip_epochs: 0
+  rollout_freq: 1
+  num_videos: 0
+  num_sequences: ${num_sequences}
+  replan_freq: 30
+  ep_len: 360
+  empty_cache: false
+  log_video_to_file: false
+  save_dir: ./videos
+  lang_folder: ${lang_folder}
+  debug: false
+  tasks:
+    _target_: calvin_env.envs.tasks.Tasks
+    tasks:
+      rotate_red_block_right: [rotate_object, 'block_red', -60]
+      rotate_red_block_left: [rotate_object, 'block_red', 60]
+      rotate_blue_block_right: [rotate_object, 'block_blue', -60]
+      rotate_blue_block_left: [rotate_object, 'block_blue', 60]
+      rotate_pink_block_right: [rotate_object, 'block_pink', -60]
+      rotate_pink_block_left: [rotate_object, 'block_pink', 60]
+      push_red_block_right: [push_object, 'block_red', 0.1, 0]
+      push_red_block_left: [push_object, 'block_red', -0.1, 0]
+      push_blue_block_right: [push_object, 'block_blue', 0.1, 0]
+      push_blue_block_left: [push_object, 'block_blue', -0.1, 0]
+      push_pink_block_right: [push_object, 'block_pink', 0.1, 0]
+      push_pink_block_left: [push_object, 'block_pink', -0.1, 0]
+      move_slider_left: [move_door_rel, 'base__slide', 0.15]
+      move_slider_right: [move_door_rel, 'base__slide', -0.15]
+      open_drawer: [move_door_rel, 'base__drawer', 0.12]
+      close_drawer: [move_door_rel, 'base__drawer', -0.12]
+      lift_red_block_table: [lift_object, 'block_red', 0.05, 'table', 'base_link']
+      lift_red_block_slider: [lift_object, 'block_red', 0.03, 'table', 'plank_link']
+      lift_red_block_drawer: [lift_object, 'block_red', 0.05, 'table', 'drawer_link']
+      lift_blue_block_table: [lift_object, 'block_blue', 0.05, 'table', 'base_link']
+      lift_blue_block_slider: [lift_object, 'block_blue', 0.03, 'table', 'plank_link']
+      lift_blue_block_drawer: [lift_object, 'block_blue', 0.05, 'table', 'drawer_link']
+      lift_pink_block_table: [lift_object, 'block_pink', 0.05, 'table', 'base_link']
+      lift_pink_block_slider: [lift_object, 'block_pink', 0.03, 'table', 'plank_link']
+      lift_pink_block_drawer: [lift_object, 'block_pink', 0.05, 'table', 'drawer_link']
+      place_in_slider: [place_object, 'table', 'plank_link']
+      place_in_drawer: [place_object, 'table', 'drawer_link']
+      stack_block: [stack_objects]
+      unstack_block: [unstack_objects]
+      turn_on_lightbulb: [toggle_light, 'lightbulb', 0, 1]
+      turn_off_lightbulb: [toggle_light, 'lightbulb', 1, 0]
+      turn_on_led: [toggle_light, 'led', 0, 1]
+      turn_off_led: [toggle_light, 'led', 1, 0]
+      push_into_drawer: [push_object_into, ['block_red', 'block_blue', 'block_pink'], 'table', 'base_link', 'table', 'drawer_link']
+  val_annotations:
+    rotate_red_block_right: ["take the red block and rotate it to the right"]
+    rotate_red_block_left: ["take the red block and rotate it to the left"]
+    rotate_blue_block_right: ["take the blue block and rotate it to the right"]
+    rotate_blue_block_left: ["take the blue block and rotate it to the left"]
+    rotate_pink_block_right: ["take the pink block and rotate it to the right"]
+    rotate_pink_block_left: ["take the pink block and rotate it to the left"]
+    push_red_block_right: ["go push the red block right"]
+    push_red_block_left: ["go push the red block left"]
+    push_blue_block_right: ["go push the blue block right"]
+    push_blue_block_left: ["go push the blue block left"]
+    push_pink_block_right: ["go push the pink block right"]
+    push_pink_block_left: ["go push the pink block left"]
+    move_slider_left: ["push the sliding door to the left side"]
+    move_slider_right: ["push the sliding door to the right side"]
+    open_drawer: ["pull the handle to open the drawer"]
+    close_drawer: ["push the handle to close the drawer"]
+    lift_red_block_table: ["grasp and lift the red block"]
+    lift_blue_block_table: ["grasp and lift the blue block"]
+    lift_pink_block_table: ["grasp and lift the pink block"]
+    lift_red_block_slider: ["lift the red block from the sliding cabinet"]
+    lift_blue_block_slider: ["lift the blue block from the sliding cabinet"]
+    lift_pink_block_slider: ["lift the pink block from the sliding cabinet"]
+    lift_red_block_drawer: ["Take the red block from the drawer"]
+    lift_blue_block_drawer: ["Take the blue block from the drawer"]
+    lift_pink_block_drawer: ["Take the pink block from the drawer"]
+    place_in_slider: ["store the grasped block in the sliding cabinet"]
+    place_in_drawer: ["store the grasped block in the drawer"]
+    push_into_drawer: ["slide the block that it falls into the drawer"]
+    stack_block: ["stack the grasped block"]
+    unstack_block: ["remove the stacked block"]
+    turn_on_lightbulb: ["use the switch to turn on the light bulb"]
+    turn_off_lightbulb: ["use the switch to turn off the light bulb"]
+    turn_on_led: ["press the button to turn on the led light"]
+    turn_off_led: ["press the button to turn off the led light"]

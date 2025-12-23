@@ -846,11 +846,13 @@ class MoDeDiT(nn.Module):
         return x
 
     def process_sigma_embeddings(self, sigma):
-        sigmas = sigma.log() / 4 # log-normalize sigma
-        if sigmas.dim() == 0:
-            sigmas = sigmas.unsqueeze(0)
-        sigmas = einops.rearrange(sigmas, 'b -> b 1')
-        emb_t = self.sigma_emb(sigmas)
+        # sigmas = sigma.log() / 4 # log-normalize sigma
+        #改成了[-1,1]区间
+        sigma_scaled = (sigma - 0.5) * 2
+        if sigma.dim() == 0:
+            sigma = sigma.unsqueeze(0)
+        sigma = einops.rearrange(sigma_scaled, 'b -> b 1')
+        emb_t = self.sigma_emb(sigma)
         emb_t = self.sigma_linear(emb_t)
         if len(emb_t.shape) == 2:
             emb_t = einops.rearrange(emb_t, 'b d -> b 1 d')
@@ -1002,6 +1004,7 @@ class MoDeDiT(nn.Module):
 
         # Process noise embeddings
         emb_t = self.process_sigma_embeddings(sigma)
+        emb_t = sigma
         
         if self.use_goal_in_routing and goal is not None:
             goal_embed = self.goal_emb(goal)

@@ -1,0 +1,84 @@
+# @package _global_
+
+# Fast version with precomputed CLIP features
+# Expected 3-5x training speedup!
+
+defaults:
+  - _self_
+  - callbacks: calvin
+  - datamodule: calvin_lang_datamodule
+  - logger: many_loggers_mode
+  - model: mode_agent  # Will override with vis_aware_fast
+  - trainer: ddp
+
+seed: 2024
+
+paths:
+  root_dir: ${oc.env:PROJECT_ROOT}
+  data_dir: ${paths.root_dir}/dataset/task_D_D
+  # Precomputed CLIP features directory
+  clip_features_dir: ${paths.root_dir}/dataset/task_D_D/clip_features
+  log_dir: ${paths.root_dir}/logs/
+  work_dir: ${hydra:runtime.cwd}
+
+trainer:
+  max_steps: 200000
+  val_check_interval: 1000
+  check_val_every_n_epoch: null
+  log_every_n_steps: 10
+  gradient_clip_val: 0.5
+
+datamodule:
+  root_data_dir: ${paths.data_dir}
+  datasets:
+    vision:
+      _target_: experiments.vis_aware.models.disk_dataset_with_clip.DiskDatasetWithCLIP
+      clip_features_dir: ${paths.clip_features_dir}
+      use_precomputed_clip: true
+  num_workers:
+    train: 8
+    val: 2
+  batch_size:
+    train: 16
+    val: 16
+
+model:
+  _target_: experiments.vis_aware.models.vis_aware_agent_fast.VisAwareFlowMatchingAgentFast
+  use_precomputed_clip: true
+
+  # Architecture
+  use_text_not_embedding: true
+  use_vision_resampler: false
+  use_proprio: true
+
+  # Network dimensions
+  cls_token_dim: 1024  # 512 * 2 cameras (CLIP ViT-B/32)
+  hidden_dim: 512
+  action_dim: 7
+  action_horizon: 10
+
+  # Flow matching
+  flow_type: "conditional"  # or "rectified"
+  sampling_method: "euler"  # or "heun", "rk4", "midpoint"
+  num_sampling_steps: 10
+
+  # Loss weights
+  vis_loss_weight: 0.5
+
+  # MoDE specific
+  entropy_gamma: 0.0
+  router_z_delta: 0.0
+
+  # Optimizer
+  lr: 1e-4
+  weight_decay: 1e-6
+  warmup_steps: 1000
+
+task_name: "vis_aware_calvin_fast"
+tags: ["vis_aware", "flow_matching", "precomputed_clip", "fast"]
+
+hydra:
+  job:
+    name: vis_aware_calvin_fast
+  run:
+    dir: ${paths.log_dir}/${task_name}/runs/${now:%Y-%m-%d_%H-%M-%S}

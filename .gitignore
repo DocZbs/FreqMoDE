@@ -1,6 +1,14 @@
 .vscode
 dataset
+experiments/flow_matching/logs/
+experiments/flow_matching/scripts/
+experiments/flow_matching/eval/
+experiments/freq_flow/
+*.ckpt
 
+
+logs/
+seed_42/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
